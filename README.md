@@ -23,6 +23,24 @@ Windows 现代化桌面定时任务工具，界面使用 PySide6/Qt 实现。
 - “选项”打开独立设置窗口，可配置开机自启、关闭行为和桌面通知
 - 任务列表的启用开关可直接点击；工具栏只保留常用操作
 
+## 软件截图
+
+### 主界面
+
+![TTask 主界面](docs/screenshots/main-window.png)
+
+### 任务计划设置
+
+![TTask 任务计划设置](docs/screenshots/schedule-settings.png)
+
+### 日期规则设置
+
+![TTask 日期规则设置](docs/screenshots/date-settings.png)
+
+### 节假日管理
+
+![TTask 节假日管理](docs/screenshots/holiday-management.png)
+
 ## 安装与启动
 
 ```powershell
