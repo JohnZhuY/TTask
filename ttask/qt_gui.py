@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import platform
 import secrets
 import shlex
 import socket
 import sys
 import threading
+import urllib.request
+import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -56,6 +61,7 @@ from .engine import SchedulerEngine
 from .i18n import translate
 from .holidays_cn import (
     day_info, day_source, downloaded_years, is_workday, manual_info,
+    export_user_data, holiday_data_path, import_user_data, reset_user_data,
     set_manual_day, update_years,
 )
 from .models import ActionType, ScheduleType, Task
@@ -81,7 +87,7 @@ APP_VERSION = __version__.removesuffix(".0")
 APP_AUTHOR = "JohnZhu"
 IPC_REQUEST = b"TTASK_ACTIVATE_V1\n"
 IPC_RESPONSE = b"TTASK_OK_V1\n"
-DEFAULT_FONT_SIZE = 11
+DEFAULT_FONT_SIZE = 10
 MIN_FONT_SIZE = 9
 MAX_FONT_SIZE = 16
 LANGUAGE_OPTIONS = (
@@ -105,13 +111,14 @@ def format_datetime(value: str | None) -> str:
         return value.replace("T", " ", 1)
 
 
-def autostart_command() -> str:
+def autostart_command(start_in_tray: bool = True) -> str:
+    suffix = " --tray" if start_in_tray else ""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --tray'
-    return f'"{sys.executable}" -m ttask --tray'
+        return f'"{sys.executable}"{suffix}'
+    return f'"{sys.executable}" -m ttask{suffix}'
 
 
-def upgrade_existing_autostart() -> None:
+def upgrade_existing_autostart(start_in_tray: bool = True) -> None:
     """Migrate an existing startup entry to background/tray mode."""
     if sys.platform != "win32":
         return
@@ -122,13 +129,13 @@ def upgrade_existing_autostart() -> None:
             winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE
         ) as key:
             winreg.QueryValueEx(key, "TTask")
-            winreg.SetValueEx(key, "TTask", 0, winreg.REG_SZ, autostart_command())
+            winreg.SetValueEx(key, "TTask", 0, winreg.REG_SZ, autostart_command(start_in_tray))
     except FileNotFoundError:
         pass
 
 
 STYLE = """
-QWidget { font-family: "Microsoft YaHei UI"; font-size: __FONT_SIZE__px; color: #172033; }
+QWidget { font-family: "Microsoft YaHei UI"; font-size: __FONT_SIZE__pt; color: #172033; }
 QMainWindow, QDialog { background: #f4f7fb; }
 QToolBar { background: #ffffff; border: none; border-bottom: 1px solid #dfe6f0; spacing: 4px; padding: 4px 8px; }
 QToolButton, QPushButton { background: #ffffff; border: 1px solid #d7dfeb; border-radius: 6px; padding: 4px 9px; }
@@ -164,6 +171,22 @@ QDialog#previewDialog QListWidget::item { min-height: 30px; border-bottom: 1px s
 QDialog#previewDialog QListWidget::item:hover { background: #edf5ff; }
 """
 
+DARK_STYLE = """
+QWidget { color: #e5e7eb; }
+QMainWindow, QDialog { background: #111827; }
+QToolBar, QFrame#card, QFrame#metricCard { background: #182235; border-color: #334155; }
+QToolButton, QPushButton, QLineEdit, QComboBox, QSpinBox, QListWidget,
+QTableWidget, QTabWidget::pane { background: #1f2937; color: #e5e7eb; border-color: #475569; }
+QToolButton:hover, QPushButton:hover { background: #293548; }
+QTabBar::tab { background: #202b3d; color: #cbd5e1; }
+QTabBar::tab:selected { background: #1f2937; color: #60a5fa; }
+QTableWidget { alternate-background-color: #182235; gridline-color: #334155; selection-background-color: #274c77; selection-color: white; }
+QHeaderView::section { background: #263449; color: #e2e8f0; border-color: #475569; }
+QLabel#sectionTitle { color: #e2e8f0; }
+QFrame#dateStateCard, QFrame#legendCard { background: #1b2638; border-color: #475569; }
+QStatusBar { background: #0f172a; }
+"""
+
 
 def normalized_font_size(value: str | int | None) -> int:
     """Return a safe, supported UI font size."""
@@ -181,17 +204,26 @@ def resolved_language(value: str | None) -> str:
     return "zh_CN" if QLocale.system().language() == QLocale.Chinese else "en_US"
 
 
-def build_style(font_size: str | int | None = DEFAULT_FONT_SIZE) -> str:
-    return STYLE.replace("__FONT_SIZE__", str(normalized_font_size(font_size)))
+def build_style(font_size: str | int | None = DEFAULT_FONT_SIZE, theme: str = "light") -> str:
+    result = STYLE.replace("__FONT_SIZE__", str(normalized_font_size(font_size)))
+    return result + (DARK_STYLE if theme == "dark" else "")
 
 
 def apply_appearance(app: QApplication, database: Database) -> None:
     """Apply persisted appearance preferences to the running application."""
     size = normalized_font_size(database.get_setting("font_size", str(DEFAULT_FONT_SIZE)))
+    scale = max(90, min(125, int(database.get_setting("ui_scale", "100")))) / 100
+    effective_size = max(MIN_FONT_SIZE, round(size * scale))
+    theme = database.get_setting("theme", "system")
+    if theme == "system":
+        try:
+            theme = "dark" if app.styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
+        except AttributeError:
+            theme = "light"
     font = QFont("Microsoft YaHei UI")
-    font.setPixelSize(size)
+    font.setPointSize(effective_size)
     app.setFont(font)
-    app.setStyleSheet(build_style(size))
+    app.setStyleSheet(build_style(effective_size, theme))
 
 
 def translate_widget_tree(root: QWidget, language: str) -> None:
@@ -322,9 +354,10 @@ class TimeRuleDialog(QDialog):
 
 
 class TaskDialog(QDialog):
-    def __init__(self, parent=None, task: Task | None = None):
+    def __init__(self, parent=None, task: Task | None = None, database: Database | None = None):
         super().__init__(parent)
         self.task = task
+        self.database = database or getattr(parent, "database", None)
         self.result_task: Task | None = None
         self.windows = copy.deepcopy(task.time_windows) if task and task.time_windows else []
         self.overrides = set(task.weekend_overrides if task else [])
@@ -399,6 +432,8 @@ class TaskDialog(QDialog):
         self.date_rule.addItems(["每周指定日期", "工作日（含法定调休）"])
         if self.task and self.task.workdays_only:
             self.date_rule.setCurrentIndex(1)
+        elif not self.task and self.database and self.database.get_setting("default_date_rule", "weekdays") == "workday":
+            self.date_rule.setCurrentIndex(1)
         layout.addWidget(QLabel("日期规则"), 5, 0)
         layout.addWidget(self.date_rule, 5, 1, 1, 2)
         self.rules = QListWidget()
@@ -419,7 +454,8 @@ class TaskDialog(QDialog):
         self.day_checks = []
         for index, label in enumerate(WEEKDAYS):
             check = QCheckBox(label)
-            check.setChecked(index in self.task.weekdays if self.task else index < 5)
+            default_rule = self.database.get_setting("default_date_rule", "weekdays") if self.database else "weekdays"
+            check.setChecked(index in self.task.weekdays if self.task else default_rule == "daily" or index < 5)
             self.day_checks.append(check)
             days.addWidget(check)
         days.addStretch()
@@ -524,12 +560,14 @@ class TaskDialog(QDialog):
         self.retry_delay.setValue(int(config.get("retry_delay", 5)))
         self.disable_after = QSpinBox()
         self.disable_after.setRange(0, 100)
-        self.disable_after.setValue(int(config.get("disable_after_failures", 0)))
+        default_failure = int(self.database.get_setting("default_failure_limit", "0")) if self.database else 0
+        self.disable_after.setValue(int(config.get("disable_after_failures", default_failure)))
         self.misfire_policy = QComboBox()
         self.misfire_policy.addItem("直接跳过错过计划（默认）", "skip")
         self.misfire_policy.addItem("补执行一次", "run_once")
         self.misfire_policy.addItem("补执行错过计划（最多 1000 次）", "run_all")
-        selected_policy = self.misfire_policy.findData(config.get("misfire_policy", "skip"))
+        default_policy = self.database.get_setting("default_misfire_policy", "skip") if self.database else "skip"
+        selected_policy = self.misfire_policy.findData(config.get("misfire_policy", default_policy))
         self.misfire_policy.setCurrentIndex(max(0, selected_policy))
         form.addRow("失败重试次数", self.retries)
         form.addRow("重试间隔（秒）", self.retry_delay)
@@ -917,7 +955,8 @@ class OptionsDialog(QDialog):
         self.database = database
         self.setWindowTitle("选项")
         self.setWindowIcon(parent.windowIcon())
-        self.setFixedSize(510, 390)
+        self.resize(760, 560)
+        self.setMinimumSize(700, 520)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
         tabs = QTabWidget()
@@ -928,24 +967,36 @@ class OptionsDialog(QDialog):
         self.autostart = QCheckBox("开机时自动运行 TTask")
         self.autostart.setChecked(self._autostart_enabled())
         general_layout.addWidget(self.autostart)
+        self.start_in_tray = QCheckBox("开机启动后直接进入系统托盘")
+        self.start_in_tray.setChecked(database.get_setting("start_in_tray", "1") == "1")
+        general_layout.addWidget(self.start_in_tray)
         general_layout.addSpacing(12)
         general_layout.addWidget(QLabel("点击主窗口关闭按钮时："))
         self.to_tray = QRadioButton("隐藏到系统托盘，任务继续运行")
         self.exit_app = QRadioButton("直接退出程序")
+        self.ask_close = QRadioButton("每次询问")
         mode = database.get_setting("close_mode", "tray")
         self.to_tray.setChecked(mode == "tray")
         self.exit_app.setChecked(mode == "exit")
+        self.ask_close.setChecked(mode == "ask")
         general_layout.addWidget(self.to_tray)
         general_layout.addWidget(self.exit_app)
-        general_layout.addStretch()
-        notice = QWidget()
-        notice_layout = QVBoxLayout(notice)
-        notice_layout.setContentsMargins(24, 22, 24, 22)
+        general_layout.addWidget(self.ask_close)
+        self.restore_layout = QCheckBox("启动时恢复上次窗口位置、大小和表格布局")
+        self.restore_layout.setChecked(database.get_setting("restore_layout", "1") == "1")
+        self.restore_selection = QCheckBox("启动后自动选中上次使用的任务")
+        self.restore_selection.setChecked(database.get_setting("restore_selection", "1") == "1")
+        self.confirm_run = QCheckBox("立即运行任务前要求确认")
+        self.confirm_run.setChecked(database.get_setting("confirm_run", "0") == "1")
+        general_layout.addSpacing(10)
+        general_layout.addWidget(self.restore_layout)
+        general_layout.addWidget(self.restore_selection)
+        general_layout.addWidget(self.confirm_run)
         self.notifications = QCheckBox("显示任务失败及自动停用通知")
         self.notifications.setChecked(database.get_setting("notifications", "1") == "1")
-        notice_layout.addWidget(self.notifications)
-        notice_layout.addWidget(QLabel("关闭后执行结果仍会完整写入最近执行记录。"))
-        notice_layout.addStretch()
+        general_layout.addWidget(self.notifications)
+        general_layout.addWidget(QLabel("关闭通知后，执行结果仍会完整写入执行记录。"))
+        general_layout.addStretch()
 
         appearance = QWidget()
         appearance_layout = QFormLayout(appearance)
@@ -960,10 +1011,40 @@ class OptionsDialog(QDialog):
         self.language.setCurrentIndex(max(0, language_index))
         self.font_size = QSpinBox()
         self.font_size.setRange(MIN_FONT_SIZE, MAX_FONT_SIZE)
-        self.font_size.setSuffix(" px")
+        self.font_size.setSuffix(" pt")
         self.font_size.setValue(normalized_font_size(database.get_setting("font_size", str(DEFAULT_FONT_SIZE))))
+        self.font_preset = QComboBox()
+        self.font_preset.addItem("小（9 pt）", 9)
+        self.font_preset.addItem("标准（10 pt）", 10)
+        self.font_preset.addItem("大（12 pt）", 12)
+        self.font_preset.addItem("自定义", 0)
+        preset_index = self.font_preset.findData(self.font_size.value())
+        self.font_preset.setCurrentIndex(preset_index if preset_index >= 0 else 3)
+        self.font_preset.currentIndexChanged.connect(self._font_preset_changed)
+        self.ui_scale = QComboBox()
+        for value in (90, 100, 110, 125):
+            self.ui_scale.addItem(f"{value}%", value)
+        self.ui_scale.setCurrentIndex(max(0, self.ui_scale.findData(int(database.get_setting("ui_scale", "100")))))
+        self.theme = QComboBox()
+        for code, label in (("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
+            self.theme.addItem(label, code)
+        self.theme.setCurrentIndex(max(0, self.theme.findData(database.get_setting("theme", "system"))))
+        self.table_density = QComboBox()
+        for code, label in (("compact", "紧凑"), ("normal", "标准"), ("comfortable", "宽松")):
+            self.table_density.addItem(label, code)
+        self.table_density.setCurrentIndex(max(0, self.table_density.findData(database.get_setting("table_density", "normal"))))
+        self.alternating_rows = QCheckBox("表格使用隔行背景色")
+        self.alternating_rows.setChecked(database.get_setting("alternating_rows", "1") == "1")
+        reset_layout = QPushButton("恢复默认布局")
+        reset_layout.clicked.connect(self._reset_layout)
         appearance_layout.addRow("界面语言", self.language)
-        appearance_layout.addRow("字体大小", self.font_size)
+        appearance_layout.addRow("字体预设", self.font_preset)
+        appearance_layout.addRow("自定义字体大小", self.font_size)
+        appearance_layout.addRow("界面缩放", self.ui_scale)
+        appearance_layout.addRow("主题", self.theme)
+        appearance_layout.addRow("表格密度", self.table_density)
+        appearance_layout.addRow("", self.alternating_rows)
+        appearance_layout.addRow("", reset_layout)
         appearance_hint = QLabel("字体大小保存后立即生效；界面语言将在重新启动 TTask 后生效。")
         appearance_hint.setWordWrap(True)
         appearance_hint.setStyleSheet("color:#64748b;")
@@ -971,7 +1052,74 @@ class OptionsDialog(QDialog):
         appearance_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
         tabs.addTab(general, "常规")
         tabs.addTab(appearance, "外观")
-        tabs.addTab(notice, "通知")
+
+        scheduling = QWidget()
+        scheduling_form = QFormLayout(scheduling)
+        scheduling_form.setContentsMargins(24, 22, 24, 22)
+        self.default_date_rule = QComboBox()
+        for code, label in (("workday", "工作日"), ("weekdays", "周一至周五"), ("daily", "每天")):
+            self.default_date_rule.addItem(label, code)
+        self.default_date_rule.setCurrentIndex(max(0, self.default_date_rule.findData(database.get_setting("default_date_rule", "weekdays"))))
+        self.default_misfire = QComboBox()
+        for code, label in (("skip", "直接跳过（默认）"), ("run_once", "补执行一次"), ("run_all", "补执行错过计划（最多 1000 次）")):
+            self.default_misfire.addItem(label, code)
+        self.default_misfire.setCurrentIndex(max(0, self.default_misfire.findData(database.get_setting("default_misfire_policy", "skip"))))
+        self.preview_count = QSpinBox(); self.preview_count.setRange(1, 1000); self.preview_count.setValue(int(database.get_setting("preview_count", "20")))
+        self.default_failure_limit = QSpinBox(); self.default_failure_limit.setRange(0, 100); self.default_failure_limit.setValue(int(database.get_setting("default_failure_limit", "0")))
+        self.resume_check = QCheckBox("从休眠恢复后检查错过的计划"); self.resume_check.setChecked(database.get_setting("resume_misfire_check", "1") == "1")
+        self.allow_concurrent = QCheckBox("允许同一任务并发执行"); self.allow_concurrent.setChecked(database.get_setting("allow_concurrent", "0") == "1")
+        random_help = QLabel("随机时间由任务随机种子、执行日期和时间段共同确定；同一天重启软件后结果保持不变。")
+        random_help.setWordWrap(True); random_help.setStyleSheet("color:#64748b;")
+        scheduling_form.addRow("默认日期规则", self.default_date_rule)
+        scheduling_form.addRow("默认错过计划策略", self.default_misfire)
+        scheduling_form.addRow("待执行计划预览数量", self.preview_count)
+        scheduling_form.addRow("默认连续失败停用次数", self.default_failure_limit)
+        scheduling_form.addRow("", self.resume_check)
+        scheduling_form.addRow("", self.allow_concurrent)
+        scheduling_form.addRow("随机时间说明", random_help)
+        tabs.addTab(scheduling, "调度")
+
+        data_page = QWidget()
+        data_form = QFormLayout(data_page); data_form.setContentsMargins(24, 22, 24, 22)
+        path_label = QLineEdit(database.path); path_label.setReadOnly(True)
+        open_data = QPushButton("打开数据目录"); open_data.clicked.connect(self._open_data_directory)
+        backup = QPushButton("备份数据库…"); backup.clicked.connect(self._backup_database)
+        restore = QPushButton("从备份恢复…"); restore.clicked.connect(self._restore_database)
+        self.log_retention = QSpinBox(); self.log_retention.setRange(0, 3650); self.log_retention.setSpecialValueText("永久保留"); self.log_retention.setSuffix(" 天"); self.log_retention.setValue(int(database.get_setting("log_retention_days", "0")))
+        self.auto_cleanup = QCheckBox("启动时自动清理过期执行记录"); self.auto_cleanup.setChecked(database.get_setting("auto_cleanup_logs", "0") == "1")
+        diagnostics = QPushButton("导出诊断信息…"); diagnostics.clicked.connect(self._export_diagnostics)
+        health = QPushButton("数据库健康检查"); health.clicked.connect(self._database_health)
+        data_form.addRow("当前数据库", path_label); data_form.addRow("", open_data)
+        data_form.addRow("", backup); data_form.addRow("", restore)
+        data_form.addRow("执行记录保留", self.log_retention); data_form.addRow("", self.auto_cleanup)
+        data_form.addRow("", diagnostics); data_form.addRow("", health)
+        tabs.addTab(data_page, "数据与日志")
+
+        holiday_page = QWidget()
+        holiday_form = QFormLayout(holiday_page); holiday_form.setContentsMargins(24, 22, 24, 22)
+        self.auto_holiday_update = QCheckBox("启动后自动检查节假日数据更新"); self.auto_holiday_update.setChecked(database.get_setting("auto_holiday_update", "0") == "1")
+        self.holiday_years = QSpinBox(); self.holiday_years.setRange(1, 5); self.holiday_years.setValue(int(database.get_setting("holiday_year_count", "2"))); self.holiday_years.setSuffix(" 年")
+        years_text = "、".join(map(str, downloaded_years())) or "尚未在线更新"
+        source_label = QLabel("在线数据：NateScarlet/holiday-cn；离线时继续使用已下载和内置数据。")
+        source_label.setWordWrap(True)
+        last_update = database.get_setting("holiday_last_update", "从未在线更新")
+        last_label = QLabel(f"{years_text}\n最近更新：{last_update}")
+        update = QPushButton("立即更新节假日"); update.clicked.connect(self._update_holidays)
+        reset = QPushButton("恢复内置数据"); reset.clicked.connect(self._reset_holidays)
+        export = QPushButton("导出节假日数据…"); export.clicked.connect(self._export_holidays)
+        import_button = QPushButton("导入节假日数据…"); import_button.clicked.connect(self._import_holidays)
+        holiday_form.addRow("", self.auto_holiday_update); holiday_form.addRow("更新年份范围", self.holiday_years)
+        holiday_form.addRow("数据来源", source_label); holiday_form.addRow("已在线更新年份", last_label)
+        holiday_form.addRow("", update); holiday_form.addRow("", reset); holiday_form.addRow("", export); holiday_form.addRow("", import_button)
+        tabs.addTab(holiday_page, "节假日")
+
+        about = QWidget(); about_layout = QVBoxLayout(about); about_layout.setContentsMargins(28, 24, 28, 24)
+        title = QLabel(f"TTask v{APP_VERSION}"); title.setStyleSheet("font-size:18px;font-weight:700;color:#2563eb;")
+        about_layout.addWidget(title); about_layout.addWidget(QLabel(f"作者：{APP_AUTHOR}"))
+        about_layout.addWidget(QLabel("现代化 Windows 桌面定时任务工具 · MIT License"))
+        for label, slot in (("打开 GitHub 项目", lambda: webbrowser.open("https://github.com/JohnZhuY/TTask")), ("检查更新", self._check_updates), ("查看更新日志", self._show_changelog), ("查看开源许可证", self._show_license), ("问题反馈", lambda: webbrowser.open("https://github.com/JohnZhuY/TTask/issues")), ("支持项目", lambda: webbrowser.open("https://github.com/JohnZhuY/TTask#支持项目"))):
+            button = QPushButton(label); button.clicked.connect(slot); about_layout.addWidget(button)
+        about_layout.addStretch(); tabs.addTab(about, "关于")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存")
         buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
@@ -993,7 +1141,7 @@ class OptionsDialog(QDialog):
             return False
 
     @staticmethod
-    def _set_autostart(enabled):
+    def _set_autostart(enabled, start_in_tray=True):
         if sys.platform != "win32":
             return
         import winreg
@@ -1002,7 +1150,7 @@ class OptionsDialog(QDialog):
             0, winreg.KEY_ALL_ACCESS,
         ) as key:
             if enabled:
-                winreg.SetValueEx(key, "TTask", 0, winreg.REG_SZ, autostart_command())
+                winreg.SetValueEx(key, "TTask", 0, winreg.REG_SZ, autostart_command(start_in_tray))
             else:
                 try:
                     winreg.DeleteValue(key, "TTask")
@@ -1011,21 +1159,116 @@ class OptionsDialog(QDialog):
 
     def _save(self):
         try:
-            self._set_autostart(self.autostart.isChecked())
+            self._set_autostart(self.autostart.isChecked(), self.start_in_tray.isChecked())
             previous_language = self.database.get_setting("language", "system")
             self.database.set_settings({
-                "close_mode": "tray" if self.to_tray.isChecked() else "exit",
+                "close_mode": "tray" if self.to_tray.isChecked() else "exit" if self.exit_app.isChecked() else "ask",
                 "notifications": "1" if self.notifications.isChecked() else "0",
                 "language": str(self.language.currentData()),
                 "font_size": str(self.font_size.value()),
+                "ui_scale": str(self.ui_scale.currentData()), "theme": str(self.theme.currentData()),
+                "table_density": str(self.table_density.currentData()), "alternating_rows": "1" if self.alternating_rows.isChecked() else "0",
+                "start_in_tray": "1" if self.start_in_tray.isChecked() else "0",
+                "restore_layout": "1" if self.restore_layout.isChecked() else "0",
+                "restore_selection": "1" if self.restore_selection.isChecked() else "0",
+                "confirm_run": "1" if self.confirm_run.isChecked() else "0",
+                "default_date_rule": str(self.default_date_rule.currentData()),
+                "default_misfire_policy": str(self.default_misfire.currentData()),
+                "preview_count": str(self.preview_count.value()),
+                "default_failure_limit": str(self.default_failure_limit.value()),
+                "resume_misfire_check": "1" if self.resume_check.isChecked() else "0",
+                "allow_concurrent": "1" if self.allow_concurrent.isChecked() else "0",
+                "log_retention_days": str(self.log_retention.value()),
+                "auto_cleanup_logs": "1" if self.auto_cleanup.isChecked() else "0",
+                "auto_holiday_update": "1" if self.auto_holiday_update.isChecked() else "0",
+                "holiday_year_count": str(self.holiday_years.value()),
             })
             apply_appearance(QApplication.instance(), self.database)
+            if self.parent():
+                self.parent().apply_preferences()
         except Exception as exc:
             QMessageBox.warning(self, "保存选项失败", str(exc))
             return
         if previous_language != self.language.currentData():
             QMessageBox.information(self, "语言设置已保存", "重新启动 TTask 后将使用所选界面语言。")
         self.accept()
+
+    def _font_preset_changed(self):
+        value = int(self.font_preset.currentData() or 0)
+        self.font_size.setEnabled(value == 0)
+        if value:
+            self.font_size.setValue(value)
+
+    def _reset_layout(self):
+        self.database.delete_settings(["ui_header_tasks", "ui_header_details", "ui_splitter_main", "ui_detail_tab", "ui_window_geometry", "ui_last_task_id"])
+        if self.parent():
+            self.parent()._reset_column_widths()
+        QMessageBox.information(self, "布局", "默认布局已恢复。")
+
+    def _open_data_directory(self):
+        path = str(Path(self.database.path).resolve().parent)
+        os.startfile(path) if sys.platform == "win32" else webbrowser.open(Path(path).as_uri())
+
+    def _backup_database(self):
+        default = str(Path(self.database.path).with_name(f"ttask-backup-{datetime.now():%Y%m%d-%H%M%S}.db"))
+        path, _ = QFileDialog.getSaveFileName(self, "备份数据库", default, "SQLite 数据库 (*.db)")
+        if path:
+            self.database.backup_to(path); QMessageBox.information(self, "备份完成", f"数据库已备份到：\n{path}")
+
+    def _restore_database(self):
+        path, _ = QFileDialog.getOpenFileName(self, "从备份恢复", str(Path(self.database.path).parent), "SQLite 数据库 (*.db)")
+        if path and QMessageBox.question(self, "确认恢复", "恢复会覆盖当前任务和记录，是否继续？") == QMessageBox.Yes:
+            self.database.restore_from(path); QMessageBox.information(self, "恢复完成", "数据库已恢复，请重新启动 TTask。")
+
+    def _export_diagnostics(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出诊断信息", "TTask-diagnostics.json", "JSON (*.json)")
+        if path:
+            payload = {"version": __version__, "python": sys.version, "platform": platform.platform(), "database": self.database.path, "database_health": self.database.health_check(), "task_count": len(self.database.list_tasks()), "log_count": self.database.count_logs(), "holiday_years": downloaded_years()}
+            Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            QMessageBox.information(self, "导出完成", path)
+
+    def _database_health(self):
+        result = self.database.health_check(); QMessageBox.information(self, "数据库健康检查", "数据库状态正常。" if result == "ok" else result)
+
+    def _update_holidays(self):
+        current = date.today().year
+        try:
+            years = update_years(list(range(current, current + self.holiday_years.value())))
+            self.database.set_settings({"holiday_last_update": datetime.now().isoformat(timespec="seconds")})
+            QMessageBox.information(self, "更新完成", "已更新：" + "、".join(map(str, years)))
+        except Exception as exc:
+            QMessageBox.warning(self, "更新失败", f"无法连接更新源或数据无效。\n{exc}\n\n现有数据不受影响，可继续离线使用。")
+
+    def _reset_holidays(self):
+        if QMessageBox.question(self, "恢复内置数据", "将清除在线数据和所有手工节假日标记，是否继续？") == QMessageBox.Yes:
+            reset_user_data(); QMessageBox.information(self, "完成", "已恢复程序内置节假日数据。")
+
+    def _export_holidays(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出节假日数据", "holidays.json", "JSON (*.json)")
+        if path: export_user_data(path)
+
+    def _import_holidays(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入节假日数据", "", "JSON (*.json)")
+        if path:
+            try: import_user_data(path); QMessageBox.information(self, "导入完成", "节假日数据已导入。")
+            except Exception as exc: QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _check_updates(self):
+        try:
+            request = urllib.request.Request("https://api.github.com/repos/JohnZhuY/TTask/releases/latest", headers={"User-Agent": "TTask"})
+            with urllib.request.urlopen(request, timeout=8) as response: payload = json.loads(response.read().decode("utf-8"))
+            latest = str(payload.get("tag_name", "")).lstrip("v")
+            QMessageBox.information(self, "检查更新", f"当前版本：{__version__}\n最新版本：{latest or '未知'}")
+        except Exception as exc:
+            QMessageBox.warning(self, "检查更新", f"无法连接 GitHub，请检查网络后重试。\n{exc}")
+
+    def _show_changelog(self):
+        path = resource_path("CHANGELOG.md")
+        QMessageBox.information(self, "更新日志", path.read_text(encoding="utf-8") if path.exists() else "请访问 GitHub 查看更新日志。")
+
+    def _show_license(self):
+        path = resource_path("LICENSE")
+        QMessageBox.information(self, "MIT License", path.read_text(encoding="utf-8") if path.exists() else "MIT License")
 
 
 class PreviewDialog(QDialog):
@@ -1225,6 +1468,7 @@ class MainWindow(QMainWindow):
         self.author_label = QLabel(f"TTask v{APP_VERSION} · 作者：{APP_AUTHOR}")
         self.author_label.setStyleSheet("color:#dbe7f5; padding:0 8px;")
         self.statusBar().addPermanentWidget(self.author_label)
+        self.apply_preferences()
         self._restore_layout()
         for table in (self.tasks, *self.detail_tables):
             table.horizontalHeader().sectionResized.connect(self._queue_layout_save)
@@ -1327,14 +1571,22 @@ class MainWindow(QMainWindow):
         return QByteArray.fromBase64(value.encode("ascii"))
 
     def _save_layout(self):
+        selected = self.selected_task()
         self.database.set_settings({
             "ui_header_tasks": self._encode_state(self.tasks.horizontalHeader().saveState()),
             "ui_header_details": self._encode_state(self.history.horizontalHeader().saveState()),
             "ui_splitter_main": self._encode_state(self.main_splitter.saveState()),
             "ui_detail_tab": str(self.detail_tabs.currentIndex()),
+            "ui_window_geometry": self._encode_state(self.saveGeometry()),
+            "ui_last_task_id": str(selected.id) if selected and selected.id else "",
         })
 
     def _restore_layout(self):
+        if self.database.get_setting("restore_layout", "1") != "1":
+            return
+        geometry = self.database.get_setting("ui_window_geometry")
+        if geometry:
+            self.restoreGeometry(self._decode_state(geometry))
         for key, target in (
             ("ui_header_tasks", self.tasks.horizontalHeader()),
             ("ui_splitter_main", self.main_splitter),
@@ -1351,6 +1603,18 @@ class MainWindow(QMainWindow):
             self.detail_tabs.setCurrentIndex(int(self.database.get_setting("ui_detail_tab", "0")))
         except ValueError:
             self.detail_tabs.setCurrentIndex(0)
+
+    def apply_preferences(self):
+        density = self.database.get_setting("table_density", "normal")
+        heights = {"compact": (30, 27), "normal": (38, 34), "comfortable": (46, 42)}
+        task_height, detail_height = heights.get(density, heights["normal"])
+        self.tasks.verticalHeader().setDefaultSectionSize(task_height)
+        alternating = self.database.get_setting("alternating_rows", "1") == "1"
+        self.tasks.setAlternatingRowColors(alternating)
+        for table in self.detail_tables:
+            table.verticalHeader().setDefaultSectionSize(detail_height)
+            table.setAlternatingRowColors(alternating)
+        self.refresh()
 
     def _card(self, title, content):
         card = QFrame()
@@ -1394,6 +1658,21 @@ class MainWindow(QMainWindow):
     def _set_row(self, table, row, values, color, centered=(), cell_colors=None):
         table.insertRow(row)
         cell_colors = cell_colors or {}
+        selected_theme = self.database.get_setting("theme", "system")
+        if selected_theme == "system":
+            try:
+                selected_theme = "dark" if QApplication.instance().styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
+            except AttributeError:
+                selected_theme = "light"
+        if selected_theme == "dark":
+            dark_colors = {
+                "#ffffff": "#1f2937", "#f8fafc": "#182235", "#f1f5f9": "#202938",
+                "#f6f7f9": "#263040", "#e2e8f0": "#334155", "#dcfce7": "#17412d",
+                "#dbeafe": "#173b63", "#fee2e2": "#5b2528", "#ffedd5": "#593919",
+                "#ede9fe": "#3b2b66", "#fff1f2": "#4b2429",
+            }
+            color = dark_colors.get(color, color)
+            cell_colors = {column: dark_colors.get(value, value) for column, value in cell_colors.items()}
         for column, value in enumerate(values):
             item = QTableWidgetItem(str(value))
             item.setBackground(QColor(cell_colors.get(column, color)))
@@ -1415,6 +1694,11 @@ class MainWindow(QMainWindow):
     def refresh(self):
         selected = self.selected_task()
         selected_id = selected.id if selected else None
+        if selected_id is None and self.database.get_setting("restore_selection", "1") == "1":
+            try:
+                selected_id = int(self.database.get_setting("ui_last_task_id"))
+            except (TypeError, ValueError):
+                selected_id = None
         self.tasks.blockSignals(True)
         self.tasks.setRowCount(0)
         query = self.search.text().strip().lower()
@@ -1449,7 +1733,8 @@ class MainWindow(QMainWindow):
             ]
             if query and query not in " ".join(values).lower():
                 continue
-            color = "#ffffff" if shown % 2 == 0 else "#f8fafc"
+            alternating = self.database.get_setting("alternating_rows", "1") == "1"
+            color = "#ffffff" if not alternating or shown % 2 == 0 else "#f8fafc"
             if not task.enabled:
                 color = "#f1f5f9" if shown % 2 == 0 else "#f6f7f9"
             status_text = values[5]
@@ -1509,7 +1794,8 @@ class MainWindow(QMainWindow):
         for current in tasks:
             if current and current.enabled:
                 schedule, _ = self._summary(current)
-                future.extend((value, current, schedule) for value in upcoming_occurrences(current, now, 20))
+                preview_count = max(1, min(1000, int(self.database.get_setting("preview_count", "20"))))
+                future.extend((value, current, schedule) for value in upcoming_occurrences(current, now, preview_count))
         future = sorted(future, key=lambda value: value[0])[:200]
         all_future = []
         for current in all_tasks:
@@ -1517,7 +1803,7 @@ class MainWindow(QMainWindow):
                 schedule, _ = self._summary(current)
                 all_future.extend(
                     (value, current, schedule)
-                    for value in upcoming_occurrences(current, now, 20)
+                    for value in upcoming_occurrences(current, now, max(1, min(1000, int(self.database.get_setting("preview_count", "20")))))
                 )
         today_future = sorted(
             (item for item in all_future if item[0].date() == now.date()),
@@ -1758,7 +2044,7 @@ class MainWindow(QMainWindow):
                 break
 
     def _dialog(self, task=None):
-        dialog = TaskDialog(self, task)
+        dialog = TaskDialog(self, task, self.database)
         return dialog.result_task if dialog.exec() == QDialog.Accepted else None
 
     def create_task(self):
@@ -1805,9 +2091,15 @@ class MainWindow(QMainWindow):
         task = self.selected_task()
         if not task:
             QMessageBox.information(self, "立即运行", "请先选择任务。")
+        elif self.database.get_setting("confirm_run", "0") == "1" and QMessageBox.question(
+            self, "立即运行", f"确定立即运行任务“{task.name}”吗？"
+        ) != QMessageBox.Yes:
+            return
         elif self.engine and self.engine.run_now(task):
             self.statusBar().showMessage(f"任务“{task.name}”已提交执行")
             QTimer.singleShot(800, self.refresh_details)
+        elif self.engine:
+            QMessageBox.information(self, "立即运行", "该任务正在执行，当前设置不允许同一任务并发运行。")
 
     def preview(self):
         task = self.selected_task()
@@ -1897,6 +2189,20 @@ class MainWindow(QMainWindow):
         self._save_layout()
         if self.quitting:
             event.accept()
+        elif self.database.get_setting("close_mode", "tray") == "ask":
+            box = QMessageBox(self)
+            box.setWindowTitle("关闭 TTask")
+            box.setText("请选择关闭主窗口后的操作。")
+            tray_button = box.addButton("最小化到托盘", QMessageBox.AcceptRole)
+            exit_button = box.addButton("退出程序", QMessageBox.DestructiveRole)
+            cancel_button = box.addButton("取消", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() == tray_button and self.tray:
+                self.hide(); event.ignore()
+            elif box.clickedButton() == exit_button:
+                event.accept() if self.quit_app() else event.ignore()
+            else:
+                event.ignore()
         elif self.database.get_setting("close_mode", "tray") == "exit":
             event.accept() if self.quit_app() else event.ignore()
         elif self.tray:
@@ -1954,10 +2260,22 @@ def run(database_path: Path) -> int:
     icon = QIcon(str(resource_path("assets/clock.ico")))
     app.setWindowIcon(icon)
     try:
-        upgrade_existing_autostart()
+        if database.get_setting("auto_cleanup_logs", "0") == "1":
+            database.cleanup_logs(int(database.get_setting("log_retention_days", "0")))
+        upgrade_existing_autostart(database.get_setting("start_in_tray", "1") == "1")
     except OSError:
         pass
     window = MainWindow(database)
+    if database.get_setting("auto_holiday_update", "0") == "1":
+        def update_holidays_in_background():
+            current = date.today().year
+            count = max(1, min(5, int(database.get_setting("holiday_year_count", "2"))))
+            try:
+                update_years(list(range(current, current + count)))
+                database.set_settings({"holiday_last_update": datetime.now().isoformat(timespec="seconds")})
+            except Exception as exc:
+                window.bridge.notification.emit("节假日更新失败", f"将继续使用本地数据：{exc}")
+        threading.Thread(target=update_holidays_in_background, daemon=True).start()
     start_in_tray = "--tray" in sys.argv or "--background" in sys.argv
     if not start_in_tray:
         window.show()

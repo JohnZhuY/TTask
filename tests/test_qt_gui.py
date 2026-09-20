@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtWidgets import QApplication, QCalendarWidget, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QCalendarWidget, QLabel, QMessageBox, QTabWidget
 
 from ttask.database import Database
 import ttask.holidays_cn as holidays
@@ -238,7 +238,7 @@ class QtGuiTests(unittest.TestCase):
         self.assertEqual(normalized_font_size("12"), 12)
         self.assertEqual(normalized_font_size("100"), 16)
         self.assertEqual(normalized_font_size("invalid"), DEFAULT_FONT_SIZE)
-        self.assertIn("font-size: 13px", build_style(13))
+        self.assertIn("font-size: 13pt", build_style(13))
         self.assertEqual(resolved_language("zh_CN"), "zh_CN")
         self.assertEqual(resolved_language("en_US"), "en_US")
 
@@ -247,6 +247,7 @@ class QtGuiTests(unittest.TestCase):
             database = Database(Path(directory) / "appearance.db")
             parent = MainWindow(database, start_services=False)
             dialog = OptionsDialog(parent, database)
+            self.assertEqual(dialog.findChild(QTabWidget).count(), 6)
             dialog.language.setCurrentIndex(dialog.language.findData("en_US"))
             dialog.font_size.setValue(14)
             with patch.object(dialog, "_set_autostart"), patch.object(
@@ -255,10 +256,24 @@ class QtGuiTests(unittest.TestCase):
                 dialog._save()
             self.assertEqual(database.get_setting("language"), "en_US")
             self.assertEqual(database.get_setting("font_size"), "14")
-            self.assertIn("font-size: 14px", QApplication.instance().styleSheet())
+            self.assertIn("font-size: 14pt", QApplication.instance().styleSheet())
             database.set_settings({"font_size": str(DEFAULT_FONT_SIZE)})
             apply_appearance(QApplication.instance(), database)
             parent.close()
+
+    def test_new_task_uses_saved_scheduling_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "defaults.db")
+            database.set_settings({
+                "default_date_rule": "daily",
+                "default_misfire_policy": "run_once",
+                "default_failure_limit": "4",
+            })
+            dialog = TaskDialog(database=database)
+            self.assertTrue(all(check.isChecked() for check in dialog.day_checks))
+            self.assertEqual(dialog.misfire_policy.currentData(), "run_once")
+            self.assertEqual(dialog.disable_after.value(), 4)
+            dialog.close()
 
     def test_english_language_translates_main_window_shell(self):
         with tempfile.TemporaryDirectory() as directory:

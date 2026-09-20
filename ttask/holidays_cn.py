@@ -133,6 +133,35 @@ def downloaded_years() -> list[int]:
     return sorted(_downloaded)
 
 
+def holiday_data_path() -> Path:
+    return USER_DATA_PATH
+
+
+def export_user_data(destination: str | Path) -> None:
+    _save_user_data()
+    Path(destination).write_text(USER_DATA_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def import_user_data(source: str | Path) -> None:
+    payload = json.loads(Path(source).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("downloaded", {}), dict):
+        raise ValueError("节假日数据文件格式无效")
+    USER_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = USER_DATA_PATH.with_suffix(".import.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(USER_DATA_PATH)
+    _load_user_data()
+
+
+def reset_user_data() -> None:
+    _downloaded.clear()
+    _manual.clear()
+    try:
+        USER_DATA_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def manual_info(value: date) -> DayInfo | None:
     return _manual.get(value.isoformat())
 

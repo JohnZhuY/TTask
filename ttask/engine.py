@@ -25,6 +25,7 @@ class SchedulerEngine:
         self.last_error = ""
         self._active = 0
         self._active_lock = threading.Lock()
+        self._running_task_ids: set[int] = set()
         self._processes: set[subprocess.Popen] = set()
         self._process_lock = threading.Lock()
         self.last_check = self._load_last_check()
@@ -77,6 +78,11 @@ class SchedulerEngine:
         while not self.stop_event.wait(1):
             now = datetime.now()
             window_start = min(self.last_check, now)
+            if (
+                (now - window_start).total_seconds() > 10
+                and self.database.get_setting("resume_misfire_check", "1") != "1"
+            ):
+                window_start = now - timedelta(seconds=2)
             try:
                 tasks = self.database.list_tasks()
             except Exception as exc:
@@ -116,17 +122,27 @@ class SchedulerEngine:
         elif policy != "run_all":
             due_values = due_values[-1:]
         for due in due_values:
+            with self._active_lock:
+                if task.id in self._running_task_ids and self.database.get_setting("allow_concurrent", "0") != "1":
+                    continue
             stamp = due.isoformat(timespec="seconds")
             log_id = self.database.claim_occurrence(task.id, stamp)
             if log_id is not None:
+                with self._active_lock:
+                    self._running_task_ids.add(task.id)
                 self.pool.submit(self._execute, task, log_id)
 
     def run_now(self, task: Task) -> bool:
         if task.id is None:
             return False
+        with self._active_lock:
+            if task.id in self._running_task_ids and self.database.get_setting("allow_concurrent", "0") != "1":
+                return False
         stamp = f"manual:{datetime.now().isoformat(timespec='microseconds')}"
         log_id = self.database.claim_occurrence(task.id, stamp)
         if log_id is not None:
+            with self._active_lock:
+                self._running_task_ids.add(task.id)
             self.pool.submit(self._execute, task, log_id)
             return True
         return False
@@ -156,6 +172,8 @@ class SchedulerEngine:
         finally:
             with self._active_lock:
                 self._active -= 1
+                if task.id is not None:
+                    self._running_task_ids.discard(task.id)
 
     def _execute_once(self, task: Task) -> str:
         config = self._render_config(task)

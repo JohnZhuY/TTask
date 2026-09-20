@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -235,6 +235,48 @@ class Database:
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
                 values.items(),
             )
+
+    def delete_settings(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        with self.connect() as db:
+            db.executemany("DELETE FROM app_settings WHERE key=?", ((key,) for key in keys))
+
+    def backup_to(self, destination: str | Path) -> None:
+        """Create a transactionally consistent SQLite backup."""
+        destination = str(destination)
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.path, timeout=10)) as source:
+            with closing(sqlite3.connect(destination)) as target:
+                source.backup(target)
+
+    def restore_from(self, source: str | Path) -> None:
+        """Validate and restore a database backup over the current database."""
+        source = Path(source)
+        with closing(sqlite3.connect(source)) as candidate:
+            result = candidate.execute("PRAGMA integrity_check").fetchone()[0]
+            tables = {row[0] for row in candidate.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if result != "ok" or not {"tasks", "execution_logs", "app_settings"}.issubset(tables):
+            raise ValueError("备份文件不是有效的 TTask 数据库")
+        # SQLite's backup API safely replaces the live database while the
+        # scheduler may still open short-lived read connections.
+        with closing(sqlite3.connect(source, timeout=10)) as candidate:
+            with closing(sqlite3.connect(self.path, timeout=10)) as target:
+                candidate.backup(target)
+        self._initialize()
+
+    def cleanup_logs(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            return 0
+        cutoff = datetime.now().timestamp() - retention_days * 86400
+        cutoff_text = datetime.fromtimestamp(cutoff).isoformat(timespec="seconds")
+        with self.connect() as db:
+            cursor = db.execute("DELETE FROM execution_logs WHERE started_at < ?", (cutoff_text,))
+            return cursor.rowcount
+
+    def health_check(self) -> str:
+        with self.connect() as db:
+            return str(db.execute("PRAGMA integrity_check").fetchone()[0])
 
     @staticmethod
     def _task(row: sqlite3.Row) -> Task:

@@ -7,11 +7,19 @@ All notable changes to TTask are documented in this file.
 ### Added
 
 - Appearance settings for system language, Simplified Chinese, and English.
-- A persistent global font-size setting from 9 to 16 pixels, applied immediately.
+- A persistent global font-size setting from 9 to 16 points, applied immediately.
+- Theme, interface scale, table density, alternating-row, and layout reset options.
+- Startup, tray, close-confirmation, layout restoration, task-selection, and run-confirmation preferences.
+- Defaults for date rules, missed schedules, future preview size, failure disabling, resume checks, and task concurrency.
+- SQLite backup, validated restore, log retention, diagnostics export, and database integrity checks.
+- Holiday auto-update, year range, offline status, reset, import, and export controls.
+- About page with project links, update checks, changelog, license, feedback, and support links.
 
 ### Changed
 
 - Application styling is now generated from persisted appearance preferences at startup.
+- Windows startup commands respect the background/tray preference.
+- SQLite restore checkpoints WAL data before replacing the active database.
 
 ## [9.16.0] - 2026-09-20
 

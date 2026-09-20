@@ -86,6 +86,21 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.database.get_setting("notifications"), "0")
         self.assertEqual(self.database.get_setting("missing", "default"), "default")
 
+    def test_backup_restore_cleanup_and_health_check(self):
+        saved = self.database.save_task(Task(
+            name="backup-task", schedule_type=ScheduleType.FIXED,
+            action_type=ActionType.NOTIFICATION, time_start="08:00:00",
+        ))
+        log_id = self.database.claim_occurrence(saved.id, "backup-occurrence")
+        self.database.finish_log(log_id, "success", "ok")
+        backup = Path(self.temp.name) / "backup.db"
+        self.database.backup_to(backup)
+        self.database.delete_task(saved.id)
+        self.database.restore_from(backup)
+        self.assertEqual(self.database.health_check(), "ok")
+        self.assertEqual(self.database.list_tasks()[0].name, "backup-task")
+        self.assertEqual(self.database.cleanup_logs(1), 0)
+
     def test_logs_can_be_filtered_and_cleared_per_task(self):
         tasks = []
         for name in ("task-a", "task-b"):

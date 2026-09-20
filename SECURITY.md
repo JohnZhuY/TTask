@@ -19,6 +19,10 @@ tasks from sources you trust. Review command arguments, paths, URLs, and task
 configuration before enabling a task.
 
 TTask stores task configuration and execution logs locally under the current
-user profile. Holiday information is downloaded only when the user explicitly
-requests an update.
+user profile. Holiday information is downloaded when the user requests an update
+or enables automatic holiday updates in the settings center.
 
+Database restore validates SQLite integrity and the required TTask tables before
+replacing local data. Holiday JSON imports are also structurally validated. A
+diagnostics export contains environment/version information and aggregate counts,
+but intentionally excludes task action parameters and execution-log messages.

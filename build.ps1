@@ -7,6 +7,8 @@ $distPath = Join-Path $projectRoot "dist"
     --noconfirm --clean --windowed `
     --workpath $workPath --distpath $distPath `
     --icon .\assets\clock.ico --add-data ".\assets;assets" `
+    --add-data ".\README.md;." --add-data ".\CHANGELOG.md;." `
+    --add-data ".\LICENSE;." --add-data ".\THIRD_PARTY_NOTICES.md;." `
     --name TTask run_ttask.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller 构建失败，退出码：$LASTEXITCODE"
