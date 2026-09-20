@@ -111,6 +111,21 @@ TTask 可以使用当前 Windows 用户权限执行命令、访问网络以及�
 
 提交代码前请运行完整测试。开发环境和 Pull Request 说明参阅 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变化参阅 [CHANGELOG.md](CHANGELOG.md)。
 
+## 支持项目
+
+如果 TTask 对你有所帮助，可以通过微信或支付宝支持项目的持续开发。感谢你的支持！
+
+<table>
+  <tr>
+    <th>微信支付</th>
+    <th>支付宝</th>
+  </tr>
+  <tr>
+    <td><img src="docs/wechat-donation.jpg" alt="微信收款码" width="280"></td>
+    <td><img src="docs/alipay-donation.jpg" alt="支付宝收款码" width="280"></td>
+  </tr>
+</table>
+
 ## 开源许可证
 
 TTask 使用 [MIT License](LICENSE) 开源。PySide6、Qt 和其他依赖仍分别遵循其自身许可证，详情参阅 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
