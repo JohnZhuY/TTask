@@ -2,6 +2,17 @@
 
 All notable changes to TTask are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Appearance settings for system language, Simplified Chinese, and English.
+- A persistent global font-size setting from 9 to 16 pixels, applied immediately.
+
+### Changed
+
+- Application styling is now generated from persisted appearance preferences at startup.
+
 ## [9.16.0] - 2026-09-20
 
 ### Added
@@ -19,4 +30,3 @@ All notable changes to TTask are documented in this file.
 
 - Missed schedules now default to being skipped.
 - SQLite now uses WAL mode and busy waiting for improved concurrency.
-

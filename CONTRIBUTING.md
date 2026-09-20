@@ -25,3 +25,10 @@ Before submitting a pull request, add or update tests for behavior changes and
 ensure the complete test suite passes. Keep pull requests focused and describe
 the user-visible impact clearly.
 
+## User-interface settings
+
+Keep application-wide appearance preferences in the `app_settings` table through
+`Database.get_setting()` and `Database.set_settings()`. Font-size values must pass
+through `normalized_font_size()` before being applied. New user-facing text should
+be written so it can be moved into the shared language resources rather than being
+assembled from unrelated UI fragments.

@@ -12,9 +12,10 @@ from pathlib import Path
 # Load Shiboken before Qt modules. This is required by some frozen Windows
 # builds so its ABI DLL is initialized before PySide6.QtCore.
 import shiboken6
-from PySide6.QtCore import QByteArray, QDate, QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QDate, QEvent, QLocale, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QTextCharFormat
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QApplication,
     QCalendarWidget,
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
 from .database import Database
 from . import __version__
 from .engine import SchedulerEngine
+from .i18n import translate
 from .holidays_cn import (
     day_info, day_source, downloaded_years, is_workday, manual_info,
     set_manual_day, update_years,
@@ -79,6 +81,14 @@ APP_VERSION = __version__.removesuffix(".0")
 APP_AUTHOR = "JohnZhu"
 IPC_REQUEST = b"TTASK_ACTIVATE_V1\n"
 IPC_RESPONSE = b"TTASK_OK_V1\n"
+DEFAULT_FONT_SIZE = 11
+MIN_FONT_SIZE = 9
+MAX_FONT_SIZE = 16
+LANGUAGE_OPTIONS = (
+    ("system", "跟随系统 / System"),
+    ("zh_CN", "简体中文"),
+    ("en_US", "English"),
+)
 
 
 def resource_path(relative: str) -> Path:
@@ -118,7 +128,7 @@ def upgrade_existing_autostart() -> None:
 
 
 STYLE = """
-QWidget { font-family: "Microsoft YaHei UI"; font-size: 11px; color: #172033; }
+QWidget { font-family: "Microsoft YaHei UI"; font-size: __FONT_SIZE__px; color: #172033; }
 QMainWindow, QDialog { background: #f4f7fb; }
 QToolBar { background: #ffffff; border: none; border-bottom: 1px solid #dfe6f0; spacing: 4px; padding: 4px 8px; }
 QToolButton, QPushButton { background: #ffffff; border: 1px solid #d7dfeb; border-radius: 6px; padding: 4px 9px; }
@@ -153,6 +163,78 @@ QDialog#previewDialog QListWidget { background: white; border: 1px solid #dbe4f0
 QDialog#previewDialog QListWidget::item { min-height: 30px; border-bottom: 1px solid #edf1f6; padding: 2px 10px; }
 QDialog#previewDialog QListWidget::item:hover { background: #edf5ff; }
 """
+
+
+def normalized_font_size(value: str | int | None) -> int:
+    """Return a safe, supported UI font size."""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = DEFAULT_FONT_SIZE
+    return max(MIN_FONT_SIZE, min(MAX_FONT_SIZE, size))
+
+
+def resolved_language(value: str | None) -> str:
+    """Resolve the stored language, including the system-language option."""
+    if value in {"zh_CN", "en_US"}:
+        return value
+    return "zh_CN" if QLocale.system().language() == QLocale.Chinese else "en_US"
+
+
+def build_style(font_size: str | int | None = DEFAULT_FONT_SIZE) -> str:
+    return STYLE.replace("__FONT_SIZE__", str(normalized_font_size(font_size)))
+
+
+def apply_appearance(app: QApplication, database: Database) -> None:
+    """Apply persisted appearance preferences to the running application."""
+    size = normalized_font_size(database.get_setting("font_size", str(DEFAULT_FONT_SIZE)))
+    font = QFont("Microsoft YaHei UI")
+    font.setPixelSize(size)
+    app.setFont(font)
+    app.setStyleSheet(build_style(size))
+
+
+def translate_widget_tree(root: QWidget, language: str) -> None:
+    """Translate static Qt widget text without touching task/user data cells."""
+    widgets = [root, *root.findChildren(QWidget)]
+    for widget in widgets:
+        title = widget.windowTitle()
+        if title:
+            widget.setWindowTitle(translate(title, language))
+        if isinstance(widget, QLabel):
+            widget.setText(translate(widget.text(), language))
+        elif isinstance(widget, QAbstractButton):
+            widget.setText(translate(widget.text(), language))
+        elif isinstance(widget, QLineEdit):
+            widget.setPlaceholderText(translate(widget.placeholderText(), language))
+        if isinstance(widget, QComboBox):
+            for index in range(widget.count()):
+                widget.setItemText(index, translate(widget.itemText(index), language))
+        elif isinstance(widget, QTabWidget):
+            for index in range(widget.count()):
+                widget.setTabText(index, translate(widget.tabText(index), language))
+        elif isinstance(widget, QTableWidget):
+            for column in range(widget.columnCount()):
+                item = widget.horizontalHeaderItem(column)
+                if item:
+                    item.setText(translate(item.text(), language))
+    for action in root.findChildren(QAction):
+        action.setText(translate(action.text(), language))
+        action.setToolTip(translate(action.toolTip(), language))
+
+
+class LanguageEventFilter(QObject):
+    """Apply the selected language whenever a top-level window is shown."""
+
+    def __init__(self, language: str, parent=None):
+        super().__init__(parent)
+        self.language = language
+
+    def eventFilter(self, watched, event):
+        if self.language == "en_US" and event.type() == QEvent.Show and isinstance(watched, QWidget):
+            if watched.isWindow():
+                translate_widget_tree(watched, self.language)
+        return super().eventFilter(watched, event)
 
 
 class ToggleSwitch(QCheckBox):
@@ -835,7 +917,7 @@ class OptionsDialog(QDialog):
         self.database = database
         self.setWindowTitle("选项")
         self.setWindowIcon(parent.windowIcon())
-        self.setFixedSize(470, 300)
+        self.setFixedSize(510, 390)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
         tabs = QTabWidget()
@@ -864,7 +946,31 @@ class OptionsDialog(QDialog):
         notice_layout.addWidget(self.notifications)
         notice_layout.addWidget(QLabel("关闭后执行结果仍会完整写入最近执行记录。"))
         notice_layout.addStretch()
+
+        appearance = QWidget()
+        appearance_layout = QFormLayout(appearance)
+        appearance_layout.setContentsMargins(24, 22, 24, 22)
+        appearance_layout.setHorizontalSpacing(18)
+        appearance_layout.setVerticalSpacing(14)
+        self.language = QComboBox()
+        for code, label in LANGUAGE_OPTIONS:
+            self.language.addItem(label, code)
+        stored_language = database.get_setting("language", "system")
+        language_index = self.language.findData(stored_language)
+        self.language.setCurrentIndex(max(0, language_index))
+        self.font_size = QSpinBox()
+        self.font_size.setRange(MIN_FONT_SIZE, MAX_FONT_SIZE)
+        self.font_size.setSuffix(" px")
+        self.font_size.setValue(normalized_font_size(database.get_setting("font_size", str(DEFAULT_FONT_SIZE))))
+        appearance_layout.addRow("界面语言", self.language)
+        appearance_layout.addRow("字体大小", self.font_size)
+        appearance_hint = QLabel("字体大小保存后立即生效；界面语言将在重新启动 TTask 后生效。")
+        appearance_hint.setWordWrap(True)
+        appearance_hint.setStyleSheet("color:#64748b;")
+        appearance_layout.addRow("", appearance_hint)
+        appearance_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
         tabs.addTab(general, "常规")
+        tabs.addTab(appearance, "外观")
         tabs.addTab(notice, "通知")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存")
@@ -906,13 +1012,19 @@ class OptionsDialog(QDialog):
     def _save(self):
         try:
             self._set_autostart(self.autostart.isChecked())
+            previous_language = self.database.get_setting("language", "system")
             self.database.set_settings({
                 "close_mode": "tray" if self.to_tray.isChecked() else "exit",
                 "notifications": "1" if self.notifications.isChecked() else "0",
+                "language": str(self.language.currentData()),
+                "font_size": str(self.font_size.value()),
             })
+            apply_appearance(QApplication.instance(), self.database)
         except Exception as exc:
             QMessageBox.warning(self, "保存选项失败", str(exc))
             return
+        if previous_language != self.language.currentData():
+            QMessageBox.information(self, "语言设置已保存", "重新启动 TTask 后将使用所选界面语言。")
         self.accept()
 
 
@@ -1832,14 +1944,20 @@ def run(database_path: Path) -> int:
         pass
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
+    database = Database(database_path)
+    apply_appearance(app, database)
+    language_filter = LanguageEventFilter(
+        resolved_language(database.get_setting("language", "system")), app
+    )
+    app.installEventFilter(language_filter)
+    app._ttask_language_filter = language_filter
     icon = QIcon(str(resource_path("assets/clock.ico")))
     app.setWindowIcon(icon)
     try:
         upgrade_existing_autostart()
     except OSError:
         pass
-    window = MainWindow(Database(database_path))
+    window = MainWindow(database)
     start_in_tray = "--tray" in sys.argv or "--background" in sys.argv
     if not start_in_tray:
         window.show()

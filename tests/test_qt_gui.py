@@ -8,18 +8,25 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtWidgets import QApplication, QCalendarWidget
+from PySide6.QtWidgets import QApplication, QCalendarWidget, QLabel, QMessageBox
 
 from ttask.database import Database
 import ttask.holidays_cn as holidays
 from ttask.models import ActionType, ScheduleType, Task
 from ttask.qt_gui import (
+    DEFAULT_FONT_SIZE,
     MainWindow,
     HolidayManagerDialog,
+    OptionsDialog,
     TaskDialog,
     ToggleSwitch,
+    apply_appearance,
     autostart_command,
+    build_style,
     format_datetime,
+    normalized_font_size,
+    resolved_language,
+    translate_widget_tree,
 )
 
 
@@ -226,6 +233,44 @@ class QtGuiTests(unittest.TestCase):
 
     def test_autostart_command_starts_in_tray(self):
         self.assertIn("--tray", autostart_command())
+
+    def test_appearance_helpers_validate_font_size_and_language(self):
+        self.assertEqual(normalized_font_size("12"), 12)
+        self.assertEqual(normalized_font_size("100"), 16)
+        self.assertEqual(normalized_font_size("invalid"), DEFAULT_FONT_SIZE)
+        self.assertIn("font-size: 13px", build_style(13))
+        self.assertEqual(resolved_language("zh_CN"), "zh_CN")
+        self.assertEqual(resolved_language("en_US"), "en_US")
+
+    def test_options_persist_language_and_apply_font_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "appearance.db")
+            parent = MainWindow(database, start_services=False)
+            dialog = OptionsDialog(parent, database)
+            dialog.language.setCurrentIndex(dialog.language.findData("en_US"))
+            dialog.font_size.setValue(14)
+            with patch.object(dialog, "_set_autostart"), patch.object(
+                QMessageBox, "information"
+            ):
+                dialog._save()
+            self.assertEqual(database.get_setting("language"), "en_US")
+            self.assertEqual(database.get_setting("font_size"), "14")
+            self.assertIn("font-size: 14px", QApplication.instance().styleSheet())
+            database.set_settings({"font_size": str(DEFAULT_FONT_SIZE)})
+            apply_appearance(QApplication.instance(), database)
+            parent.close()
+
+    def test_english_language_translates_main_window_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(
+                Database(Path(directory) / "english.db"), start_services=False
+            )
+            translate_widget_tree(window, "en_US")
+            self.assertEqual(window.windowTitle(), "TTask Scheduler")
+            self.assertEqual(window.tasks.horizontalHeaderItem(0).text(), "Task")
+            self.assertEqual(window.search.placeholderText(), "Search tasks…")
+            self.assertIn("Due today", [label.text() for label in window.findChildren(QLabel)])
+            window.close()
 
 
 if __name__ == "__main__":
