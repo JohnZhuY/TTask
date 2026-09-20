@@ -2,6 +2,8 @@
 
 Windows 现代化桌面定时任务工具，界面使用 PySide6/Qt 实现。
 
+当前版本：**v9.16.1**　·　[下载最新版](https://github.com/JohnZhuY/TTask/releases/latest)　·　[查看更新记录](CHANGELOG.md)
+
 - 周一至周五按所选星期自动运行
 - 周六、周日默认不运行，可指定某个周末日期作为一次执行例外
 - 固定时间执行

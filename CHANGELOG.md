@@ -2,7 +2,7 @@
 
 All notable changes to TTask are documented in this file.
 
-## [Unreleased]
+## [9.16.1] - 2026-09-20
 
 ### Added
 
@@ -19,7 +19,8 @@ All notable changes to TTask are documented in this file.
 
 - Application styling is now generated from persisted appearance preferences at startup.
 - Windows startup commands respect the background/tray preference.
-- SQLite restore checkpoints WAL data before replacing the active database.
+- SQLite restore validates backups and uses the SQLite backup API for safe replacement.
+- The six settings tabs now share the available width without overflow buttons.
 
 ## [9.16.0] - 2026-09-20
 

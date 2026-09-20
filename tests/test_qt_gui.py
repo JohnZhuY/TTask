@@ -55,7 +55,7 @@ class QtGuiTests(unittest.TestCase):
                 )
             self.assertEqual(window.tasks.verticalHeader().defaultSectionSize(), 38)
             self.assertEqual(window.metric_tasks.text(), "0")
-            self.assertEqual(window.author_label.text(), "TTask v9.16 · 作者：JohnZhu")
+            self.assertEqual(window.author_label.text(), "TTask v9.16.1 · 作者：JohnZhu")
             window.close()
 
     def test_detail_tables_share_layout_and_clear_button_visibility(self):

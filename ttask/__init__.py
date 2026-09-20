@@ -1,3 +1,3 @@
 """TTask - Windows desktop task scheduler."""
 
-__version__ = "9.16.0"
+__version__ = "9.16.1"
