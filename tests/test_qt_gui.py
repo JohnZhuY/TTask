@@ -248,6 +248,8 @@ class QtGuiTests(unittest.TestCase):
             parent = MainWindow(database, start_services=False)
             dialog = OptionsDialog(parent, database)
             self.assertEqual(dialog.findChild(QTabWidget).count(), 6)
+            self.assertFalse(dialog.findChild(QTabWidget).tabBar().usesScrollButtons())
+            self.assertTrue(dialog.findChild(QTabWidget).tabBar().expanding())
             dialog.language.setCurrentIndex(dialog.language.findData("en_US"))
             dialog.font_size.setValue(14)
             with patch.object(dialog, "_set_autostart"), patch.object(

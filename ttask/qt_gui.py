@@ -169,6 +169,7 @@ QDialog#previewDialog QLabel#previewHint { color: #64748b; font-size: 10px; }
 QDialog#previewDialog QListWidget { background: white; border: 1px solid #dbe4f0; border-radius: 8px; padding: 5px; outline: none; }
 QDialog#previewDialog QListWidget::item { min-height: 30px; border-bottom: 1px solid #edf1f6; padding: 2px 10px; }
 QDialog#previewDialog QListWidget::item:hover { background: #edf5ff; }
+QDialog#optionsDialog QTabBar::tab { min-width: 74px; padding: 7px 9px; }
 """
 
 DARK_STYLE = """
@@ -953,6 +954,7 @@ class OptionsDialog(QDialog):
     def __init__(self, parent, database: Database):
         super().__init__(parent)
         self.database = database
+        self.setObjectName("optionsDialog")
         self.setWindowTitle("选项")
         self.setWindowIcon(parent.windowIcon())
         self.resize(760, 560)
@@ -960,6 +962,8 @@ class OptionsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
         tabs = QTabWidget()
+        tabs.tabBar().setExpanding(True)
+        tabs.tabBar().setUsesScrollButtons(False)
         layout.addWidget(tabs)
         general = QWidget()
         general_layout = QVBoxLayout(general)
