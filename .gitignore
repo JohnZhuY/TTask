@@ -1,0 +1,33 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# Build output
+dist/
+build/
+.pyinstaller-work/
+*.spec
+
+# Local application data
+*.db
+*.db-shm
+*.db-wal
+.ttask/
+
+# Test and coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system files
+.idea/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
+
